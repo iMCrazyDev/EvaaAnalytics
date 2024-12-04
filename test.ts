@@ -111,69 +111,83 @@ async function writeToFile(filename: string, content: string): Promise<void> {
 }
 
 async function main() {
-  TON_LITE_CLIENT = await initLiteClient();
-  const startDate = moment(process.env.start);
-  const endDate = moment(process.env.end);
-  const address = Address.parse(accountAddress);
+    TON_LITE_CLIENT = await initLiteClient();
+    try
+    {
+        const startDate = moment(process.env.start);
+        const endDate = moment(process.env.end);
+        const address = Address.parse(accountAddress);
 
-  let result_reseves: Record<string, any>[] = [];
-  let result_tvl: Record<string, any>[] = [];
-  let currentDate = startDate;
+        let result_reseves: Record<string, any>[] = [];
+        let result_tvl: Record<string, any>[] = [];
+        let currentDate = startDate;
 
-  while (currentDate <= endDate) {
-    const blockchain = await Blockchain.create();
-    blockchain.now = currentDate.unix();
+        while (currentDate <= endDate) {
+            try {
+                console.log("Processing ", currentDate);
 
-    const state = await processDate(currentDate);
-    if (!state) {
-      currentDate = currentDate.add(1, "days");
-      continue;
+                const blockchain = await Blockchain.create();
+                blockchain.now = currentDate.unix();
+
+                const state = await processDate(currentDate);
+                if (!state) {
+                    currentDate = currentDate.add(1, "days");
+                    continue;
+                }
+
+                const code = state.code;
+                const data = state.data;
+
+                await blockchain.setShardAccount(address, createShardAccount({
+                    address,
+                    code,
+                    data,
+                    balance: 100000000000n,
+                    workchain: -1,
+                }));
+
+
+                const provider = blockchain.provider(address, { code, data });
+                const temp_reserves: Array<[number, string]> = [];
+                const temp_tvl: Array<[number, number, string]> = [];
+
+                for (const asset of assets) {
+                    try {
+                        let res;
+                        res = await provider.get("getAssetReserves", [{ type: "int", value: asset.key }]);
+                        const reserve = res.stack.readBigNumber();
+                        temp_reserves.push([Number(reserve) / 10 ** asset.digits, asset.name]);
+                        res = await provider.get("getAssetTotals", [{ type: "int", value: asset.key }]);
+                        const totalSupply = res.stack.readBigNumber();
+                        const totalBorrow = res.stack.readBigNumber();
+                        temp_tvl.push([
+                            Number(totalSupply) / 10 ** asset.digits,
+                            Number(totalBorrow) / 10 ** asset.digits,
+                            asset.name,
+                        ]);
+                    } catch (e) {
+                        console.warn("Unable to process " + asset.address);
+                    }
+                }
+
+                result_reseves.push({ [currentDate.unix()]: temp_reserves });
+                result_tvl.push({ [currentDate.unix()]: temp_tvl });
+                currentDate = currentDate.add(1, "days");
+            }
+            catch (error: any) {
+                console.log("error ", error);
+                if (error.message.includes('nnot load state for') || error.message.includes('Index 0 > 0')) {
+                    currentDate = currentDate.add(1, "days");
+                }
+            }
+        }
+
+        await writeToFile(`reserves_${pool}.txt`, JSON.stringify(result_reseves));
+        await writeToFile(`tvl_${pool}.txt`, JSON.stringify(result_tvl));
     }
-
-    const code = state.code;
-    const data = state.data;
-
-    await blockchain.setShardAccount(address, createShardAccount({
-      address,
-      code,
-      data,
-      balance: 100000000000n,
-      workchain: -1,
-    }));
-
-    console.log("Account set successfully ", currentDate);
-
-    const provider = blockchain.provider(address, { code, data });
-    const temp_reserves: Array<[number, string]> = [];
-    const temp_tvl: Array<[number, number, string]> = [];
-
-    for (const asset of assets) {
-      try {
-        let res;
-        res = await provider.get("getAssetReserves", [{ type: "int", value: asset.key }]);
-        const reserve = res.stack.readBigNumber();
-        temp_reserves.push([Number(reserve) / 10 ** asset.digits, asset.name]);
-        res = await provider.get("getAssetTotals", [{ type: "int", value: asset.key }]);
-        const totalSupply = res.stack.readBigNumber();
-        const totalBorrow = res.stack.readBigNumber();
-        temp_tvl.push([
-            Number(totalSupply) / 10 ** asset.digits,
-            Number(totalBorrow) / 10 ** asset.digits,
-            asset.name,
-        ]);
-      } catch (e) {
-        console.warn("Unable to process " + asset.address);
-      }
+    finally {  
+        await TON_LITE_CLIENT.engine.close();
     }
-
-    result_reseves.push({ [currentDate.unix()]: temp_reserves });
-    result_tvl.push({ [currentDate.unix()]: temp_tvl });
-    currentDate = currentDate.add(1, "days");
-  }
-
-  await writeToFile(`reserves_${pool}.txt`, JSON.stringify(result_reseves));
-  await writeToFile(`tvl_${pool}.txt`, JSON.stringify(result_tvl));
-  await TON_LITE_CLIENT.engine.close();
 }
 
 main().catch((err) => console.error("An error occurred:", err));
